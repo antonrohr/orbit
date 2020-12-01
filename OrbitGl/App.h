@@ -5,13 +5,24 @@
 #ifndef ORBIT_GL_APP_H_
 #define ORBIT_GL_APP_H_
 
+#include <absl/container/flat_hash_map.h>
+#include <absl/container/flat_hash_set.h>
+#include <grpc/impl/codegen/connectivity_state.h>
+#include <grpcpp/channel.h>
+
+#include <atomic>
+#include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <outcome.hpp>
-#include <queue>
 #include <string>
+#include <string_view>
+#include <thread>
 #include <utility>
+#include <vector>
 
 #include "ApplicationOptions.h"
 #include "CallStackDataView.h"
@@ -25,23 +36,25 @@
 #include "FramePointerValidatorClient.h"
 #include "FrameTrackOnlineProcessor.h"
 #include "FunctionsDataView.h"
-#include "ImGuiOrbit.h"
+#include "GlCanvas.h"
 #include "IntrospectionWindow.h"
-#include "LiveFunctionsDataView.h"
 #include "MainThreadExecutor.h"
+#include "ManualInstrumentationManager.h"
 #include "ModulesDataView.h"
+#include "OrbitBase/Logging.h"
 #include "OrbitBase/Result.h"
 #include "OrbitBase/ThreadPool.h"
 #include "OrbitCaptureClient/CaptureClient.h"
 #include "OrbitCaptureClient/CaptureListener.h"
 #include "OrbitClientData/Callstack.h"
-#include "OrbitClientData/CallstackData.h"
-#include "OrbitClientData/FunctionInfoSet.h"
+#include "OrbitClientData/CallstackTypes.h"
 #include "OrbitClientData/ModuleData.h"
 #include "OrbitClientData/ModuleManager.h"
 #include "OrbitClientData/PostProcessedSamplingData.h"
 #include "OrbitClientData/ProcessData.h"
 #include "OrbitClientData/TracepointCustom.h"
+#include "OrbitClientData/UserDefinedCaptureData.h"
+#include "OrbitClientModel/CaptureData.h"
 #include "OrbitClientServices/CrashManager.h"
 #include "OrbitClientServices/ProcessManager.h"
 #include "OrbitClientServices/TracepointServiceClient.h"
@@ -49,31 +62,29 @@
 #include "PresetsDataView.h"
 #include "ProcessesDataView.h"
 #include "SamplingReport.h"
-#include "SamplingReportDataView.h"
 #include "ScopedStatus.h"
 #include "StatusListener.h"
 #include "StringManager.h"
 #include "SymbolHelper.h"
+#include "TextBox.h"
 #include "TracepointsDataView.h"
-#include "absl/container/flat_hash_map.h"
-#include "absl/container/flat_hash_set.h"
-#include "absl/flags/flag.h"
 #include "capture_data.pb.h"
-#include "grpcpp/grpcpp.h"
 #include "preset.pb.h"
-#include "services.grpc.pb.h"
 #include "services.pb.h"
 #include "symbol.pb.h"
-
-class Process;
+#include "tracepoint.pb.h"
 
 class OrbitApp final : public DataViewFactory, public CaptureListener {
  public:
-  OrbitApp(ApplicationOptions&& options, std::unique_ptr<MainThreadExecutor> main_thread_executor);
+  // TODO (170468590) remove when not needed anymore
+  OrbitApp(ApplicationOptions&& options, MainThreadExecutor* main_thread_executor);
+  OrbitApp(MainThreadExecutor* main_thread_executor);
   ~OrbitApp() override;
 
+  // TODO (170468590) remove when not needed anymore
   static std::unique_ptr<OrbitApp> Create(ApplicationOptions&& options,
-                                          std::unique_ptr<MainThreadExecutor> main_thread_executor);
+                                          MainThreadExecutor* main_thread_executor);
+  static std::unique_ptr<OrbitApp> Create(MainThreadExecutor* main_thread_executor);
 
   void PostInit();
   void OnExit();
@@ -289,7 +300,8 @@ class OrbitApp final : public DataViewFactory, public CaptureListener {
       const std::vector<ModuleData*>& modules,
       absl::flat_hash_map<std::string, std::vector<uint64_t>> function_hashes_to_hook_map = {},
       absl::flat_hash_map<std::string, std::vector<uint64_t>> frame_track_function_hashes_map = {});
-  void UpdateProcessAndModuleList(int32_t pid);
+  // TODO(170468590) clean this up
+  void UpdateProcessAndModuleList(ProcessData* process);
 
   void UpdateAfterSymbolLoading();
   void UpdateAfterCaptureCleared();
@@ -304,10 +316,37 @@ class OrbitApp final : public DataViewFactory, public CaptureListener {
   [[nodiscard]] DataView* GetOrCreateDataView(DataViewType type) override;
   [[nodiscard]] DataView* GetOrCreateSelectionCallstackDataView();
 
-  [[nodiscard]] ProcessManager* GetProcessManager() { return process_manager_.get(); }
+  void SetGrpcChannel(std::shared_ptr<grpc::Channel> grpc_channel) {
+    CHECK(grpc_channel_ == nullptr);
+    CHECK(grpc_channel != nullptr);
+    grpc_channel_ = std::move(grpc_channel);
+  }
+  void SetProcessManager(ProcessManager* process_manager) {
+    CHECK(process_manager_beta_ == nullptr);
+    CHECK(process_manager != nullptr);
+    process_manager_beta_ = process_manager;
+  }
+  void SetProcess(ProcessData* process) {
+    CHECK(process_ == nullptr);
+    CHECK(process != nullptr);
+    process_ = std::make_unique<ProcessData>(*process);
+  }
+  [[nodiscard]] ProcessManager* GetProcessManager() {
+    // TODO(170468590) remove this
+    if (process_manager_beta_ == nullptr) return process_manager_old_.get();
+
+    return process_manager_beta_;
+  }
   [[nodiscard]] ThreadPool* GetThreadPool() { return thread_pool_.get(); }
-  [[nodiscard]] MainThreadExecutor* GetMainThreadExecutor() { return main_thread_executor_.get(); }
+  [[nodiscard]] MainThreadExecutor* GetMainThreadExecutor() { return main_thread_executor_; }
+  [[nodiscard]] ProcessData* GetMutableSelectedProcess() const {
+    if (process_ != nullptr) return process_.get();
+    // TODO (170468590) probably remove datamanager holding multiple processes
+    return data_manager_->mutable_selected_process();
+  }
   [[nodiscard]] const ProcessData* GetSelectedProcess() const {
+    if (process_ != nullptr) return process_.get();
+    // TODO (170468590) probably remove datamanager holding multiple processes
     return data_manager_->selected_process();
   }
   [[nodiscard]] ManualInstrumentationManager* GetManualInstrumentationManager() {
@@ -455,11 +494,16 @@ class OrbitApp final : public DataViewFactory, public CaptureListener {
   std::shared_ptr<StringManager> string_manager_;
   std::shared_ptr<grpc::Channel> grpc_channel_;
 
-  std::unique_ptr<MainThreadExecutor> main_thread_executor_;
+  MainThreadExecutor* main_thread_executor_;
   std::thread::id main_thread_id_;
   std::unique_ptr<ThreadPool> thread_pool_;
   std::unique_ptr<CaptureClient> capture_client_;
-  std::unique_ptr<ProcessManager> process_manager_;
+
+  // TODO(170468590) remove this
+  std::unique_ptr<ProcessManager> process_manager_old_;
+  // TODO(170468590) rename: remove beta_;
+  ProcessManager* process_manager_beta_ = nullptr;
+
   std::unique_ptr<OrbitClientData::ModuleManager> module_manager_;
   std::unique_ptr<DataManager> data_manager_;
   std::unique_ptr<CrashManager> crash_manager_;
@@ -468,6 +512,8 @@ class OrbitApp final : public DataViewFactory, public CaptureListener {
   const SymbolHelper symbol_helper_;
 
   StatusListener* status_listener_ = nullptr;
+
+  std::unique_ptr<ProcessData> process_;
 
   std::unique_ptr<FramePointerValidatorClient> frame_pointer_validator_client_;
 

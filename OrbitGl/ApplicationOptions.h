@@ -7,6 +7,7 @@
 
 #include <string>
 
+// TODO (170468590) remove when not needed anymore
 // The struct used to store Orbit Client Application options.
 // The default values are set by main() and passed to OrbitApp::Init.
 struct ApplicationOptions {

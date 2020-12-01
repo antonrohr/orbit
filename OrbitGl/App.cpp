@@ -5,17 +5,32 @@
 #include "App.h"
 
 #include <absl/container/flat_hash_map.h>
+#include <absl/container/flat_hash_set.h>
+#include <absl/flags/declare.h>
 #include <absl/flags/flag.h>
+#include <absl/strings/match.h>
 #include <absl/strings/str_format.h>
 #include <absl/strings/str_join.h>
+#include <absl/strings/str_split.h>
+#include <absl/synchronization/mutex.h>
+#include <absl/time/time.h>
+#include <google/protobuf/stubs/common.h>
+#include <google/protobuf/stubs/port.h>
+#include <grpcpp/create_channel.h>
+#include <grpcpp/security/credentials.h>
+#include <grpcpp/support/channel_arguments.h>
+#include <imgui.h>
 
-#include <chrono>
-#include <cmath>
+#include <algorithm>
+#include <cinttypes>
+#include <cstddef>
+#include <cstdint>
 #include <fstream>
 #include <memory>
 #include <outcome.hpp>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <utility>
 
 #include "CallStackDataView.h"
@@ -27,12 +42,15 @@
 #include "FunctionsDataView.h"
 #include "GlCanvas.h"
 #include "ImGuiOrbit.h"
+#include "MainThreadExecutor.h"
 #include "ModulesDataView.h"
 #include "OrbitBase/Logging.h"
 #include "OrbitBase/Result.h"
 #include "OrbitBase/ThreadConstants.h"
 #include "OrbitBase/Tracing.h"
 #include "OrbitClientData/Callstack.h"
+#include "OrbitClientData/CallstackData.h"
+#include "OrbitClientData/FunctionInfoSet.h"
 #include "OrbitClientData/FunctionUtils.h"
 #include "OrbitClientData/ModuleData.h"
 #include "OrbitClientData/ModuleManager.h"
@@ -46,10 +64,14 @@
 #include "SamplingReport.h"
 #include "StringManager.h"
 #include "SymbolHelper.h"
+#include "TimeGraph.h"
 #include "Timer.h"
+#include "TimerChain.h"
 #include "TimerInfosIterator.h"
 #include "capture_data.pb.h"
+#include "module.pb.h"
 #include "preset.pb.h"
+#include "process.pb.h"
 #include "symbol.pb.h"
 
 #ifdef _WIN32
@@ -107,9 +129,18 @@ PresetLoadState GetPresetLoadStateForProcess(
 std::unique_ptr<OrbitApp> GOrbitApp;
 bool DoZoom = false;
 
-OrbitApp::OrbitApp(ApplicationOptions&& options,
-                   std::unique_ptr<MainThreadExecutor> main_thread_executor)
-    : options_(std::move(options)), main_thread_executor_(std::move(main_thread_executor)) {
+// TODO (170468590) remove when not needed anymore
+OrbitApp::OrbitApp(ApplicationOptions&& options, MainThreadExecutor* main_thread_executor)
+    : options_(std::move(options)), main_thread_executor_(main_thread_executor) {
+  thread_pool_ = ThreadPool::Create(4 /*min_size*/, 256 /*max_size*/, absl::Seconds(1));
+  main_thread_id_ = std::this_thread::get_id();
+  data_manager_ = std::make_unique<DataManager>(main_thread_id_);
+  module_manager_ = std::make_unique<OrbitClientData::ModuleManager>();
+  manual_instrumentation_manager_ = std::make_unique<ManualInstrumentationManager>();
+}
+
+OrbitApp::OrbitApp(MainThreadExecutor* main_thread_executor)
+    : main_thread_executor_(main_thread_executor) {
   thread_pool_ = ThreadPool::Create(4 /*min_size*/, 256 /*max_size*/, absl::Seconds(1));
   main_thread_id_ = std::this_thread::get_id();
   data_manager_ = std::make_unique<DataManager>(main_thread_id_);
@@ -283,9 +314,22 @@ void OrbitApp::OnValidateFramePointers(std::vector<const ModuleData*> modules_to
   });
 }
 
-std::unique_ptr<OrbitApp> OrbitApp::Create(
-    ApplicationOptions&& options, std::unique_ptr<MainThreadExecutor> main_thread_executor) {
-  auto app = std::make_unique<OrbitApp>(std::move(options), std::move(main_thread_executor));
+// TODO (170468590) remove when not needed anymore
+std::unique_ptr<OrbitApp> OrbitApp::Create(ApplicationOptions&& options,
+                                           MainThreadExecutor* main_thread_executor) {
+  auto app = std::make_unique<OrbitApp>(std::move(options), main_thread_executor);
+
+#ifdef _WIN32
+  oqpi::default_helpers::start_default_scheduler();
+#endif
+
+  app->LoadFileMapping();
+
+  return app;
+}
+
+std::unique_ptr<OrbitApp> OrbitApp::Create(MainThreadExecutor* main_thread_executor) {
+  auto app = std::make_unique<OrbitApp>(main_thread_executor);
 
 #ifdef _WIN32
   oqpi::default_helpers::start_default_scheduler();
@@ -297,33 +341,39 @@ std::unique_ptr<OrbitApp> OrbitApp::Create(
 }
 
 void OrbitApp::PostInit() {
-  if (!options_.grpc_server_address.empty()) {
+  // TODO(170468590) remove this
+  if (grpc_channel_ == nullptr && !options_.grpc_server_address.empty()) {
     grpc_channel_ = grpc::CreateCustomChannel(
         options_.grpc_server_address, grpc::InsecureChannelCredentials(), grpc::ChannelArguments());
     if (!grpc_channel_) {
       ERROR("Unable to create GRPC channel to %s", options_.grpc_server_address);
     }
-
+  }
+  if (grpc_channel_ != nullptr) {
     capture_client_ = std::make_unique<CaptureClient>(grpc_channel_, this);
 
-    // TODO: Replace refresh_timeout with config option. Let users to modify it.
-    process_manager_ = ProcessManager::Create(grpc_channel_, absl::Milliseconds(1000));
+    // TODO(170468590) probably remove all this
+    if (GetProcessManager() == nullptr) {
+      // TODO: Replace refresh_timeout with config option. Let users to modify it.
+      process_manager_old_ = ProcessManager::Create(grpc_channel_, absl::Milliseconds(1000));
 
-    auto callback = [this](ProcessManager* process_manager) {
-      main_thread_executor_->Schedule([this, process_manager]() {
-        const std::vector<ProcessInfo>& process_infos = process_manager->GetProcessList();
-        data_manager_->UpdateProcessInfos(process_infos);
-        processes_data_view_->SetProcessList(process_infos);
+      auto callback = [this](ProcessManager* process_manager) {
+        main_thread_executor_->Schedule([this, process_manager]() {
+          const std::vector<ProcessInfo>& process_infos = process_manager->GetProcessList();
+          data_manager_->UpdateProcessInfos(process_infos);
+          processes_data_view_->SetProcessList(process_infos);
 
-        if (GetSelectedProcess() == nullptr && processes_data_view_->GetFirstProcessId() != -1) {
-          processes_data_view_->SelectProcess(processes_data_view_->GetFirstProcessId());
-        }
-        FireRefreshCallbacks(DataViewType::kProcesses);
-      });
-    };
+          if (GetSelectedProcess() == nullptr && processes_data_view_->GetFirstProcessId() != -1) {
+            processes_data_view_->SelectProcess(processes_data_view_->GetFirstProcessId());
+          }
+          FireRefreshCallbacks(DataViewType::kProcesses);
+        });
+      };
 
-    process_manager_->SetProcessListUpdateListener(callback);
-
+      process_manager_old_->SetProcessListUpdateListener(callback);
+    } else {
+      UpdateProcessAndModuleList(GetMutableSelectedProcess());
+    }
     frame_pointer_validator_client_ =
         std::make_unique<FramePointerValidatorClient>(this, grpc_channel_);
 
@@ -487,7 +537,7 @@ void OrbitApp::Disassemble(int32_t pid, const FunctionInfo& function) {
   const bool is_64_bit = process->is_64_bit();
   const uint64_t absolute_address = FunctionUtils::GetAbsoluteAddress(function, *process, *module);
   thread_pool_->Schedule([this, absolute_address, is_64_bit, pid, function] {
-    auto result = process_manager_->LoadProcessMemory(pid, absolute_address, function.size());
+    auto result = GetProcessManager()->LoadProcessMemory(pid, absolute_address, function.size());
     if (!result.has_value()) {
       SendErrorToUi("Error reading memory", absl::StrFormat("Could not read process memory: %s.",
                                                             result.error().message()));
@@ -516,7 +566,10 @@ void OrbitApp::Disassemble(int32_t pid, const FunctionInfo& function) {
 void OrbitApp::OnExit() {
   AbortCapture();
 
-  process_manager_->ShutdownAndWait();
+  // TODO(170468590) remove this
+  if (process_manager_old_ != nullptr) {
+    process_manager_old_->ShutdownAndWait();
+  }
   thread_pool_->ShutdownAndWait();
 
   GOrbitApp = nullptr;
@@ -541,6 +594,7 @@ void OrbitApp::SetCaptureWindow(CaptureWindow* capture) {
   CHECK(capture_window_ == nullptr);
   GCurrentTimeGraph = capture->GetTimeGraph();
   capture_window_ = capture;
+  capture_window_->set_draw_help(false);
 }
 
 void OrbitApp::SetDebugCanvas(GlCanvas* debug_canvas) {
@@ -800,7 +854,7 @@ void OrbitApp::FireRefreshCallbacks(DataViewType type) {
 }
 
 bool OrbitApp::StartCapture() {
-  const ProcessData* process = data_manager_->selected_process();
+  const ProcessData* process = GetSelectedProcess();
   if (process == nullptr) {
     SendErrorToUi("Error starting capture",
                   "No process selected. Please select a target process for the capture.");
@@ -829,6 +883,7 @@ bool OrbitApp::StartCapture() {
   UserDefinedCaptureData user_defined_capture_data =
       data_manager_->mutable_user_defined_capture_data();
 
+  // CHECK(capture_client_ != nullptr);
   ErrorMessageOr<void> result = capture_client_->StartCapture(
       thread_pool_.get(), *process, *module_manager_, std::move(selected_functions_map),
       std::move(selected_tracepoints), std::move(user_defined_capture_data), enable_introspection);
@@ -851,6 +906,8 @@ void OrbitApp::StopCapture() {
 }
 
 void OrbitApp::AbortCapture() {
+  if (capture_client_ == nullptr) return;
+
   if (!capture_client_->TryAbortCapture()) {
     return;
   }
@@ -969,7 +1026,7 @@ void OrbitApp::LoadModuleOnRemote(ModuleData* module_data,
        frame_track_function_hashes = std::move(frame_track_function_hashes),
        scoped_status = std::move(scoped_status),
        error_message_from_local = std::move(error_message_from_local)]() mutable {
-        const auto result = process_manager_->FindDebugInfoFile(module_data->file_path());
+        const auto result = GetProcessManager()->FindDebugInfoFile(module_data->file_path());
 
         if (!result) {
           SendErrorToUi(
@@ -1044,7 +1101,9 @@ void OrbitApp::LoadModules(
       continue;
     }
 
-    if (!absl::GetFlag(FLAGS_local)) {
+    // TODO(170468590) maybe come up with a better indicator whether orbit is connected than
+    // process_manager != nullptr
+    if (!absl::GetFlag(FLAGS_local) && GetProcessManager() != nullptr) {
       LoadModuleOnRemote(module, std::move(function_hashes_to_hook),
                          std::move(frame_track_function_hashes), symbols_path.error().message());
       continue;
@@ -1271,10 +1330,16 @@ void OrbitApp::LoadPreset(const std::shared_ptr<PresetFile>& preset_file) {
   FireRefreshCallbacks();
 }
 
-void OrbitApp::UpdateProcessAndModuleList(int32_t pid) {
-  CHECK(processes_data_view_->GetSelectedProcessId() == pid);
-  thread_pool_->Schedule([pid, this] {
-    ErrorMessageOr<std::vector<ModuleInfo>> result = process_manager_->LoadModuleList(pid);
+void OrbitApp::UpdateProcessAndModuleList(ProcessData* process) {
+  CHECK(process != nullptr);
+
+  // TODO(170468590) remove this when processes_data_view is gone
+  if (processes_data_view_ != nullptr) {
+    CHECK(processes_data_view_->GetSelectedProcessId() == process->pid());
+  }
+  thread_pool_->Schedule([process, this]() mutable {
+    ErrorMessageOr<std::vector<ModuleInfo>> result =
+        GetProcessManager()->LoadModuleList(process->pid());
 
     if (result.has_error()) {
       ERROR("Error retrieving modules: %s", result.error().message());
@@ -1282,21 +1347,23 @@ void OrbitApp::UpdateProcessAndModuleList(int32_t pid) {
       return;
     }
 
-    main_thread_executor_->Schedule([pid, module_infos = std::move(result.value()), this] {
-      // Make sure that pid is actually what user has selected at
-      // the moment we arrive here. If not - ignore the result.
-      if (pid != processes_data_view_->GetSelectedProcessId()) {
-        return;
+    main_thread_executor_->Schedule([process, module_infos = std::move(result.value()),
+                                     this]() mutable {
+      // TODO(170468590) remove this when processes_data_view is gone
+      if (processes_data_view_ != nullptr) {
+        // Make sure that pid is actually what user has selected at
+        // the moment we arrive here. If not - ignore the result.
+        if (process->pid() != processes_data_view_->GetSelectedProcessId()) {
+          return;
+        }
       }
 
-      ProcessData* process = data_manager_->GetMutableProcessByPid(pid);
-      CHECK(process != nullptr);
       process->UpdateModuleInfos(module_infos);
 
       // If no process was selected before, or the process changed
-      if (GetSelectedProcess() == nullptr || pid != GetSelectedProcess()->pid()) {
+      if (GetSelectedProcess() == nullptr || process->pid() != GetSelectedProcess()->pid()) {
         data_manager_->ClearSelectedFunctions();
-        data_manager_->set_selected_process(pid);
+        data_manager_->set_selected_process(process->pid());
       }
 
       // Updating the list of loaded modules (in memory) of a process, can mean that a process has
@@ -1381,7 +1448,7 @@ void OrbitApp::DeselectFunction(const orbit_client_protos::FunctionInfo& func) {
 }
 
 [[nodiscard]] bool OrbitApp::IsFunctionSelected(uint64_t absolute_address) const {
-  const ProcessData* process = data_manager_->selected_process();
+  const ProcessData* process = GetSelectedProcess();
   if (process == nullptr) return false;
 
   const auto result = process->FindModuleByAddress(absolute_address);
@@ -1554,8 +1621,9 @@ DataView* OrbitApp::GetOrCreateDataView(DataViewType type) {
     case DataViewType::kProcesses:
       if (!processes_data_view_) {
         processes_data_view_ = std::make_unique<ProcessesDataView>();
-        processes_data_view_->SetSelectionListener(
-            [&](int32_t pid) { UpdateProcessAndModuleList(pid); });
+        processes_data_view_->SetSelectionListener([&](int32_t pid) {
+          UpdateProcessAndModuleList(data_manager_->GetMutableProcessByPid(pid));
+        });
         panels_.push_back(processes_data_view_.get());
       }
       return processes_data_view_.get();
@@ -1619,7 +1687,7 @@ bool OrbitApp::IsCapturing() const {
 ScopedStatus OrbitApp::CreateScopedStatus(const std::string& initial_message) {
   CHECK(std::this_thread::get_id() == main_thread_id_);
   CHECK(status_listener_ != nullptr);
-  return ScopedStatus{main_thread_executor_.get(), status_listener_, initial_message};
+  return ScopedStatus{main_thread_executor_, status_listener_, initial_message};
 }
 
 void OrbitApp::SelectTracepoint(const TracepointInfo& tracepoint) {

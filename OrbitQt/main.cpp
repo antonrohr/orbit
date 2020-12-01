@@ -14,6 +14,7 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QMessageBox>
+#include <QMetaType>
 #include <QObject>
 #include <QPalette>
 #include <QProcessEnvironment>
@@ -43,9 +44,11 @@
 
 #include "App.h"
 #include "ApplicationOptions.h"
+#include "Connections.h"
 #include "DeploymentConfigurations.h"
 #include "Error.h"
 #include "ImGuiOrbit.h"
+#include "MainThreadExecutor.h"
 #include "MainThreadExecutorImpl.h"
 #include "OrbitBase/Logging.h"
 #include "OrbitGgp/Error.h"
@@ -55,6 +58,8 @@
 #include "OrbitStartupWindow.h"
 #include "OrbitVersion/OrbitVersion.h"
 #include "Path.h"
+#include "ProfilingTargetDialog.h"
+#include "TargetConfiguration.h"
 #include "opengldetect.h"
 #include "orbitmainwindow.h"
 #include "servicedeploymanager.h"
@@ -98,6 +103,9 @@ ABSL_FLAG(bool, enable_tracepoint_feature, false,
           "Enable the setting of the panel of kernel tracepoints");
 
 ABSL_FLAG(bool, thread_state, false, "Collect thread states");
+
+// TODO(170468590): Remove this flag when the new UI is finished
+ABSL_FLAG(bool, enable_ui_beta, false, "Enable the new user interface");
 
 using ServiceDeployManager = orbit_qt::ServiceDeployManager;
 using DeploymentConfiguration = orbit_qt::DeploymentConfiguration;
@@ -165,7 +173,8 @@ static outcome::result<void> RunUiInstance(
 
   std::optional<std::error_code> error;
 
-  GOrbitApp = OrbitApp::Create(std::move(options), CreateMainThreadExecutor());
+  std::unique_ptr<MainThreadExecutor> main_thread_executer = CreateMainThreadExecutor();
+  GOrbitApp = OrbitApp::Create(std::move(options), main_thread_executer.get());
 
   {  // Scoping of QT UI Resources
     constexpr uint32_t kDefaultFontSize = 14;
@@ -205,6 +214,101 @@ static outcome::result<void> RunUiInstance(
     return outcome::failure(error.value());
   } else {
     return outcome::success();
+  }
+}
+
+void RunBetaUiInstance(QApplication* app,
+                       std::optional<DeploymentConfiguration> deployment_configuration,
+                       const Context* ssh_context) {
+  qRegisterMetaType<std::error_code>();
+
+  // TODO(170468590) remove optional from deployment_configuration as soon as not needed anymore
+  CHECK(deployment_configuration.has_value());
+
+  const GrpcPort grpc_port{/*.grpc_port =*/absl::GetFlag(FLAGS_grpc_port)};
+
+  std::unique_ptr<MainThreadExecutor> main_thread_executor = CreateMainThreadExecutor();
+  orbit_qt::SshConnectionArtifacts ssh_connection_artifacts{ssh_context, grpc_port,
+                                                            &(deployment_configuration.value())};
+
+  std::optional<orbit_qt::ConnectionConfiguration> connection_config;
+
+  while (true) {
+    {
+      orbit_qt::ProfilingTargetDialog target_dialog{
+          &ssh_connection_artifacts, main_thread_executor.get(), std::move(connection_config)};
+      connection_config = target_dialog.Exec();
+
+      if (!connection_config.has_value()) {
+        // User closed dialog
+        break;
+      }
+    }
+
+    GOrbitApp = OrbitApp::Create(main_thread_executor.get());
+
+    int application_return_code = 0;
+
+    {  // Scoping of QT UI Resources
+
+      ServiceDeployManager* service_deploy_manager_ptr = nullptr;
+      std::visit(
+          [&service_deploy_manager_ptr](auto&& target) {
+            using Target = std::decay_t<decltype(target)>;
+            if constexpr (std::is_same_v<Target, orbit_qt::StadiaProfilingTarget>) {
+              service_deploy_manager_ptr = target.GetConnection()->GetServiceDeployManager();
+            } else if constexpr (std::is_same_v<Target, orbit_qt::LocalTarget>) {
+            } else if constexpr (std::is_same_v<Target, orbit_qt::FileTarget>) {
+            } else {
+              UNREACHABLE();
+            }
+          },
+          connection_config.value());
+
+      constexpr uint32_t kDefaultFontSize = 14;
+
+      OrbitMainWindow w(app, std::move(connection_config.value()), kDefaultFontSize);
+
+      // "resize" is required to make "showMaximized" work properly.
+      w.resize(1280, 720);
+      w.showMaximized();
+
+      QMessageBox box(QMessageBox::Critical, QApplication::applicationName(), "", QMessageBox::Ok);
+      auto error_handler = [&]() -> ScopedConnection {
+        if (service_deploy_manager_ptr == nullptr) {
+          return ScopedConnection();
+        }
+
+        return OrbitSshQt::ScopedConnection{QObject::connect(
+            service_deploy_manager_ptr, &ServiceDeployManager::socketErrorOccurred,
+            service_deploy_manager_ptr, [&](std::error_code error) {
+              main_thread_executor->Schedule([&box, &w, error] {
+                box.setText(
+                    QString("Connection error: %1").arg(QString::fromStdString(error.message())));
+                box.exec();
+                w.close();
+                QApplication::exit(1);
+              });
+            })};
+      }();
+
+      application_return_code = QApplication::exec();
+
+      connection_config = w.ClearConnectionConfiguration();
+    }
+
+    Orbit_ImGui_Shutdown();
+    GOrbitApp->OnExit();
+
+    if (application_return_code == 0) {
+      // User closed window
+      break;
+    } else if (application_return_code == 1) {
+      // User clicked end session, or socket error occurred.
+      continue;
+    } else {
+      UNREACHABLE();
+    }
   }
 }
 
@@ -270,7 +374,7 @@ static std::optional<std::string> GetCollectorPath(const QProcessEnvironment& pr
 }
 
 static std::optional<orbit_qt::DeploymentConfiguration> FigureOutDeploymentConfiguration() {
-  if (absl::GetFlag(FLAGS_local)) {
+  if (absl::GetFlag(FLAGS_local) && !absl::GetFlag(FLAGS_enable_ui_beta)) {
     return std::nullopt;
   } else if (absl::GetFlag(FLAGS_nodeploy)) {
     return orbit_qt::NoDeployment{};
@@ -399,6 +503,11 @@ int main(int argc, char* argv[]) {
       DisplayErrorToUser(QString("An error occurred while initializing ssh: %1")
                              .arg(QString::fromStdString(context.error().message())));
       return -1;
+    }
+
+    if (absl::GetFlag(FLAGS_enable_ui_beta)) {
+      RunBetaUiInstance(&app, deployment_configuration, &context.value());
+      return 0;
     }
 
     while (true) {

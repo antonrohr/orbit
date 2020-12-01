@@ -5,23 +5,38 @@
 #ifndef ORBIT_QT_ORBIT_MAIN_WINDOW_H_
 #define ORBIT_QT_ORBIT_MAIN_WINDOW_H_
 
-#include <DisassemblyReport.h>
-
 #include <QApplication>
-#include <QLabel>
-#include <QLineEdit>
+#include <QCloseEvent>
+#include <QEvent>
+#include <QFrame>
+#include <QIcon>
 #include <QMainWindow>
+#include <QObject>
+#include <QPoint>
 #include <QString>
+#include <QTabWidget>
 #include <QTimer>
+#include <QWidget>
+#include <algorithm>
+#include <cstdint>
+#include <map>
 #include <memory>
-#include <outcome.hpp>
+#include <optional>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
-#include "CallStackDataView.h"
 #include "CallTreeView.h"
+#include "DataView.h"
+#include "DataViewTypes.h"
+#include "DisassemblyReport.h"
 #include "StatusListener.h"
+#include "TargetConfiguration.h"
+#include "capture_data.pb.h"
+#include "orbitglwidget.h"
 #include "servicedeploymanager.h"
+#include "ui_orbitmainwindow.h"
 
 namespace Ui {
 class OrbitMainWindow;
@@ -31,7 +46,10 @@ class OrbitMainWindow : public QMainWindow {
   Q_OBJECT
 
  public:
-  OrbitMainWindow(QApplication* a_App, orbit_qt::ServiceDeployManager* service_deploy_manager,
+  OrbitMainWindow(QApplication* app, orbit_qt::ConnectionConfiguration connection_configuration,
+                  uint32_t font_size);
+  // TODO (170468590) remove when not needed anymore
+  OrbitMainWindow(QApplication* app, orbit_qt::ServiceDeployManager* service_deploy_manager,
                   uint32_t font_size);
   ~OrbitMainWindow() override;
 
@@ -62,6 +80,10 @@ class OrbitMainWindow : public QMainWindow {
 
   void RestoreDefaultTabLayout();
 
+  std::optional<orbit_qt::ConnectionConfiguration> ClearConnectionConfiguration() {
+    return std::move(connection_configuration_);
+  }
+
  protected:
   void closeEvent(QCloseEvent* event) override;
 
@@ -77,6 +99,7 @@ class OrbitMainWindow : public QMainWindow {
   void OnFilterTracksTextChanged(const QString& text);
 
   void on_actionOpen_Preset_triggered();
+  void on_actionEnd_Session_triggered();
   void on_actionQuit_triggered();
   void on_actionSave_Preset_As_triggered();
 
@@ -102,6 +125,7 @@ class OrbitMainWindow : public QMainWindow {
   void StartMainTimer();
   void SetupCaptureToolbar();
   void SetupCodeView();
+  void SetupMainWindow(uint32_t font_size);
 
   void SaveCurrentTabLayoutAsDefaultInMemory();
 
@@ -118,6 +142,7 @@ class OrbitMainWindow : public QMainWindow {
   QTimer* m_MainTimer = nullptr;
   std::vector<OrbitGLWidget*> m_GlWidgets;
   OrbitGLWidget* introspection_widget_ = nullptr;
+  QFrame* hint_frame_ = nullptr;
 
   // Capture toolbar.
   QIcon icon_start_capture_;
@@ -134,6 +159,8 @@ class OrbitMainWindow : public QMainWindow {
     int current_index;
   };
   std::map<QTabWidget*, TabWidgetLayout> default_tab_layout_;
+
+  std::optional<orbit_qt::ConnectionConfiguration> connection_configuration_;
 };
 
 #endif  // ORBIT_QT_ORBIT_MAIN_WINDOW_H_

@@ -4,7 +4,21 @@
 
 #include "ModulesDataView.h"
 
+#include <absl/flags/declare.h>
+#include <absl/strings/ascii.h>
+#include <absl/strings/str_format.h>
+#include <absl/strings/str_split.h>
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <memory>
+
 #include "App.h"
+#include "CoreUtils.h"
+#include "DataViewTypes.h"
+#include "OrbitBase/Logging.h"
 #include "OrbitClientData/ProcessData.h"
 #include "absl/flags/flag.h"
 
@@ -188,12 +202,12 @@ void ModulesDataView::UpdateModules(const ProcessData* process) {
 }
 
 void ModulesDataView::OnRefreshButtonClicked() {
-  const ProcessData* process = GOrbitApp->GetSelectedProcess();
+  ProcessData* process = GOrbitApp->GetMutableSelectedProcess();
   if (process == nullptr) {
     LOG("Unable to refresh module list, no process selected");
     return;
   }
-  GOrbitApp->UpdateProcessAndModuleList(process->pid());
+  GOrbitApp->UpdateProcessAndModuleList(process);
 }
 
 bool ModulesDataView::GetDisplayColor(int row, int /*column*/, unsigned char& red,
