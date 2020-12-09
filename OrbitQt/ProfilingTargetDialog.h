@@ -35,10 +35,9 @@ class ProfilingTargetDialog : public QDialog {
 
  public:
   explicit ProfilingTargetDialog(SshConnectionArtifacts* ssh_connection_artifacts,
-                                 MainThreadExecutor* main_thread_executor,
-                                 std::optional<ConnectionConfiguration> connection_configuration,
+                                 std::optional<TargetConfiguration> target_configuration_opt,
                                  QWidget* parent = nullptr);
-  std::optional<ConnectionConfiguration> Exec();
+  [[nodiscard]] std::optional<TargetConfiguration> Exec();
  private slots:
   void SelectFile();
   void SetupStadiaProcessManager();
@@ -56,16 +55,10 @@ class ProfilingTargetDialog : public QDialog {
   void TryConnectToLocal();
 
  private:
-  enum class TargetEnum { kStadia, kLocal, kFile };
-
   std::unique_ptr<Ui::ProfilingTargetDialog> ui_;
-
-  TargetEnum current_target_;
 
   ProcessItemModel process_model_;
   QSortFilterProxyModel process_proxy_model_;
-
-  MainThreadExecutor* main_thread_executor_;
 
   std::unique_ptr<ProcessData> process_;
   std::unique_ptr<ProcessManager> process_manager_;
@@ -77,34 +70,36 @@ class ProfilingTargetDialog : public QDialog {
 
   // State Machine & States
   QStateMachine state_machine_;
-  QState s_stadia_;
-  QHistoryState s_s_history_;
-  QState s_s_connecting_;
-  QState s_s_connected_;
-  QState s_s_processes_loading_;
-  QState s_s_process_selected_;
-  QState s_s_no_process_selected_;
+  QState state_stadia_;
+  QHistoryState state_stadia_history_;
+  QState state_stadia_connecting_;
+  QState state_stadia_connected_;
+  QState state_stadia_processes_loading_;
+  QState state_stadia_process_selected_;
+  QState state_stadia_no_process_selected_;
 
-  QState s_file_;
-  QHistoryState s_f_history_;
-  QState s_f_file_selected_;
-  QState s_f_no_file_selected_;
+  QState state_file_;
+  QHistoryState state_file_history_;
+  QState state_file_selected_;
+  QState state_file_no_selection_;
 
-  QState s_local_;
-  QHistoryState s_l_history_;
-  QState s_l_connecting_;
-  QState s_l_connected_;
-  QState s_l_processes_loading_;
-  QState s_l_process_selected_;
-  QState s_l_no_process_selected_;
+  QState state_local_;
+  QHistoryState state_local_history_;
+  QState state_local_connecting_;
+  QState state_local_connected_;
+  QState state_local_processes_loading_;
+  QState state_local_process_selected_;
+  QState state_local_no_process_selected_;
 
-  void SetupStateMachine();
   void SetupStadiaStates();
   void SetupFileStates();
   void SetupLocalStates();
-  void TrySelectProcess(const ProcessData& process);
+  [[nodiscard]] bool TrySelectProcess(const ProcessData& process);
   void OnProcessListUpdate(ProcessManager* process_manager);
   void SetupProcessManager(const std::shared_ptr<grpc::Channel>& grpc_channel);
+  void SetTargetAndInitialState(StadiaTarget target);
+  void SetTargetAndInitialState(LocalTarget target);
+  void SetTargetAndInitialState(FileTarget target);
 };
 
 }  // namespace orbit_qt
