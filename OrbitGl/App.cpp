@@ -341,7 +341,7 @@ std::unique_ptr<OrbitApp> OrbitApp::Create(MainThreadExecutor* main_thread_execu
 }
 
 void OrbitApp::PostInit() {
-  // TODO(170468590) remove this
+  // TODO(170468590): [ui beta] When out of ui beta, remove this
   if (grpc_channel_ == nullptr && !options_.grpc_server_address.empty()) {
     grpc_channel_ = grpc::CreateCustomChannel(
         options_.grpc_server_address, grpc::InsecureChannelCredentials(), grpc::ChannelArguments());
@@ -352,7 +352,7 @@ void OrbitApp::PostInit() {
   if (grpc_channel_ != nullptr) {
     capture_client_ = std::make_unique<CaptureClient>(grpc_channel_, this);
 
-    // TODO(170468590) probably remove all this
+    // TODO(170468590): [ui beta] When out of ui beta, probably remove all of this
     if (GetProcessManager() == nullptr) {
       // TODO: Replace refresh_timeout with config option. Let users to modify it.
       process_manager_old_ = ProcessManager::Create(grpc_channel_, absl::Milliseconds(1000));
@@ -566,10 +566,6 @@ void OrbitApp::Disassemble(int32_t pid, const FunctionInfo& function) {
 void OrbitApp::OnExit() {
   AbortCapture();
 
-  // TODO(170468590) remove this
-  if (process_manager_old_ != nullptr) {
-    process_manager_old_->ShutdownAndWait();
-  }
   thread_pool_->ShutdownAndWait();
 
   GOrbitApp = nullptr;
@@ -883,7 +879,7 @@ bool OrbitApp::StartCapture() {
   UserDefinedCaptureData user_defined_capture_data =
       data_manager_->mutable_user_defined_capture_data();
 
-  // CHECK(capture_client_ != nullptr);
+  CHECK(capture_client_ != nullptr);
   ErrorMessageOr<void> result = capture_client_->StartCapture(
       thread_pool_.get(), *process, *module_manager_, std::move(selected_functions_map),
       std::move(selected_tracepoints), std::move(user_defined_capture_data), enable_introspection);
@@ -1101,8 +1097,8 @@ void OrbitApp::LoadModules(
       continue;
     }
 
-    // TODO(170468590) maybe come up with a better indicator whether orbit is connected than
-    // process_manager != nullptr
+    // TODO(170468590): [ui beta] maybe come up with a better indicator whether orbit is connected
+    // than process_manager != nullptr
     if (!absl::GetFlag(FLAGS_local) && GetProcessManager() != nullptr) {
       LoadModuleOnRemote(module, std::move(function_hashes_to_hook),
                          std::move(frame_track_function_hashes), symbols_path.error().message());
@@ -1333,11 +1329,11 @@ void OrbitApp::LoadPreset(const std::shared_ptr<PresetFile>& preset_file) {
 void OrbitApp::UpdateProcessAndModuleList(ProcessData* process) {
   CHECK(process != nullptr);
 
-  // TODO(170468590) remove this when processes_data_view is gone
+  // TODO(170468590): [ui beta] When out of ui beta and processes_data_view is gone, remove this
   if (processes_data_view_ != nullptr) {
     CHECK(processes_data_view_->GetSelectedProcessId() == process->pid());
   }
-  thread_pool_->Schedule([process, this]() mutable {
+  thread_pool_->Schedule([process, this]() {
     ErrorMessageOr<std::vector<ModuleInfo>> result =
         GetProcessManager()->LoadModuleList(process->pid());
 
@@ -1347,9 +1343,8 @@ void OrbitApp::UpdateProcessAndModuleList(ProcessData* process) {
       return;
     }
 
-    main_thread_executor_->Schedule([process, module_infos = std::move(result.value()),
-                                     this]() mutable {
-      // TODO(170468590) remove this when processes_data_view is gone
+    main_thread_executor_->Schedule([process, module_infos = std::move(result.value()), this]() {
+      // TODO(170468590): [ui beta] When out of ui beta and processes_data_view is gone, remove this
       if (processes_data_view_ != nullptr) {
         // Make sure that pid is actually what user has selected at
         // the moment we arrive here. If not - ignore the result.

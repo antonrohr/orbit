@@ -73,6 +73,7 @@
 #include "Path.h"
 #include "SamplingReport.h"
 #include "StatusListenerImpl.h"
+#include "TargetConfiguration.h"
 #include "TutorialContent.h"
 #include "absl/flags/flag.h"
 #include "absl/strings/match.h"
@@ -106,21 +107,28 @@ namespace {
 const QString kLightGrayColor = "rgb(117, 117, 117)";
 const QString kMediumGrayColor = "rgb(68, 68, 68)";
 const QString kGreenColor = "rgb(41, 218, 130)";
+constexpr int khintFramePosX = 21;
+constexpr int khintFramePosY = 47;
+constexpr int khintFrameWidth = 140;
+constexpr int khintFrameHeight = 45;
 }  // namespace
 
 OrbitMainWindow::OrbitMainWindow(QApplication* app,
-                                 orbit_qt::ConnectionConfiguration connection_configuration,
+                                 orbit_qt::TargetConfiguration target_configuration,
                                  uint32_t font_size)
-    : QMainWindow(nullptr), m_App(app), ui(new Ui::OrbitMainWindow) {
+    : QMainWindow(nullptr),
+      m_App(app),
+      ui(new Ui::OrbitMainWindow),
+      target_configuration_(std::move(target_configuration)) {
   SetupMainWindow(font_size);
 
   auto* target_widget = new QWidget();
   target_widget->setStyleSheet(QString("background-color: %1").arg(kMediumGrayColor));
-  auto* target_label = new QLabel();
-  target_label->setContentsMargins(6, 0, 0, 0);
+  target_label_ = new QLabel();
+  target_label_->setContentsMargins(6, 0, 0, 0);
   auto* disconnect_target_button = new QPushButton("End Session");
   auto* target_layout = new QHBoxLayout();
-  target_layout->addWidget(target_label);
+  target_layout->addWidget(target_label_);
   target_layout->addWidget(disconnect_target_button);
   target_layout->setMargin(0);
   target_widget->setLayout(target_layout);
@@ -158,10 +166,8 @@ OrbitMainWindow::OrbitMainWindow(QApplication* app,
   hint_layout->setStretchFactor(hint_message, 1);
   hint_frame_->setParent(ui->CaptureTab);
 
-  // for column and tab right: 17, 42
-  // for tab left 21, 47
-  hint_frame_->move(21, 47);
-  hint_frame_->resize(140, 45);
+  hint_frame_->move(khintFramePosX, khintFramePosY);
+  hint_frame_->resize(khintFrameWidth, khintFrameHeight);
 
   ui->RightTabWidget->setTabText(ui->RightTabWidget->indexOf(ui->FunctionsTab), "Symbols");
   ui->MainTabWidget->removeTab(ui->MainTabWidget->indexOf(ui->HomeTab));
@@ -194,61 +200,27 @@ OrbitMainWindow::OrbitMainWindow(QApplication* app,
                               /*is_main_instance=*/true, /*uniform_row_height=*/false,
                               /*text_alignment=*/Qt::AlignTop | Qt::AlignLeft);
 
-  std::visit(
-      [target_label](auto&& target) {
-        using Target = std::decay_t<decltype(target)>;
-        if constexpr (std::is_same_v<Target, orbit_qt::StadiaProfilingTarget>) {
-          orbit_qt::StadiaConnection* connection = target.GetConnection();
-          orbit_qt::ServiceDeployManager* service_deploy_manager =
-              connection->GetServiceDeployManager();
-          GOrbitApp->SetSecureCopyCallback(
-              [service_deploy_manager](std::string_view source, std::string_view destination) {
-                CHECK(service_deploy_manager != nullptr);
-                return service_deploy_manager->CopyFileToLocal(std::string{source},
-                                                               std::string{destination});
-              });
-          GOrbitApp->SetGrpcChannel(connection->GetGrpcChannel());
-          GOrbitApp->SetProcessManager(target.GetProcessManager());
-          GOrbitApp->SetProcess(target.GetProcess());
+  // TODO(170468590): [ui beta] When out of ui beta, target_configuration_ should not be an optional
+  // anymore, and this CHECK and convenience local variable are not needed anymore.
+  CHECK(target_configuration_.has_value());
+  orbit_qt::TargetConfiguration& target = target_configuration_.value();
 
-          std::string target_label_text =
-              absl::StrFormat("%s @ %s", target.GetProcess()->name(),
-                              connection->GetInstance().display_name.toStdString());
-          target_label->setText(QString::fromStdString(target_label_text));
-          target_label->setStyleSheet(QString("color: %1").arg(kGreenColor));
-        } else if constexpr (std::is_same_v<Target, orbit_qt::LocalTarget>) {
-          orbit_qt::LocalConnection* connection = target.GetConnection();
-          GOrbitApp->SetGrpcChannel(connection->GetGrpcChannel());
-          GOrbitApp->SetProcessManager(target.GetProcessManager());
-          GOrbitApp->SetProcess(target.GetProcess());
-
-          std::string target_label_text =
-              absl::StrFormat("%s @ localhost", target.GetProcess()->name());
-          target_label->setText(QString::fromStdString(target_label_text));
-          target_label->setStyleSheet(QString("color: %1").arg(kGreenColor));
-        } else if constexpr (std::is_same_v<Target, orbit_qt::FileTarget>) {
-          target_label->setText(
-              QString::fromStdString(target.GetCaptureFilePath().filename().string()));
-        } else {
-          UNREACHABLE();
-        }
-      },
-      connection_configuration);
+  std::visit([this](auto& target) { SetTarget(target); }, target);
 
   GOrbitApp->PostInit();
 
   SaveCurrentTabLayoutAsDefaultInMemory();
-  UpdateCaptureStateDependentWidgets();
 
-  // TODO(170468590): OpenCapture() needs to happen after PostInit(). As soon as PostInit() is
-  // cleaned up, PostInit should be called before std::visit and then the OpenCapture can be called
-  // inside the visit lambda;
-  if (std::holds_alternative<orbit_qt::FileTarget>(connection_configuration)) {
-    OpenCapture(
-        std::get<orbit_qt::FileTarget>(connection_configuration).GetCaptureFilePath().string());
+  // TODO(170468590): [ui beta] Currently a call to OpenCapture() needs to happen after
+  // OrbitApp::PostInit(). As soon as PostInit() is cleaned up (see todo comments
+  // in PostInit), it should be called before std::visit and then OpenCapture can be called
+  // inside SetTarget(FileTarget).
+  std::string file_path_to_open;
+  if (std::holds_alternative<orbit_qt::FileTarget>(target)) {
+    OpenCapture(std::get<orbit_qt::FileTarget>(target).GetCaptureFilePath().string());
   }
 
-  connection_configuration_ = std::move(connection_configuration);
+  UpdateCaptureStateDependentWidgets();
 }
 
 OrbitMainWindow::OrbitMainWindow(QApplication* app,
@@ -1084,7 +1056,6 @@ void OrbitMainWindow::on_actionServiceStackOverflow_triggered() {
 
 void OrbitMainWindow::OnCaptureCleared() {
   ui->liveFunctions->Reset();
-
   UpdateCaptureStateDependentWidgets();
 }
 
@@ -1126,4 +1097,37 @@ void OrbitMainWindow::closeEvent(QCloseEvent* event) {
   } else {
     QMainWindow::closeEvent(event);
   }
+}
+
+void OrbitMainWindow::SetTarget(orbit_qt::StadiaTarget& target) {
+  const orbit_qt::StadiaConnection* connection = target.GetConnection();
+  orbit_qt::ServiceDeployManager* service_deploy_manager = connection->GetServiceDeployManager();
+  GOrbitApp->SetSecureCopyCallback([service_deploy_manager](std::string_view source,
+                                                            std::string_view destination) {
+    CHECK(service_deploy_manager != nullptr);
+    return service_deploy_manager->CopyFileToLocal(std::string{source}, std::string{destination});
+  });
+  GOrbitApp->SetGrpcChannel(connection->GetGrpcChannel());
+  GOrbitApp->SetProcessManager(target.GetProcessManager());
+  GOrbitApp->SetProcess(target.GetProcess());
+
+  std::string target_label_text = absl::StrFormat(
+      "%s @ %s", target.GetProcess()->name(), connection->GetInstance().display_name.toStdString());
+  target_label_->setText(QString::fromStdString(target_label_text));
+  target_label_->setStyleSheet(QString("color: %1").arg(kGreenColor));
+}
+
+void OrbitMainWindow::SetTarget(orbit_qt::LocalTarget& target) {
+  const orbit_qt::LocalConnection* connection = target.GetConnection();
+  GOrbitApp->SetGrpcChannel(connection->GetGrpcChannel());
+  GOrbitApp->SetProcessManager(target.GetProcessManager());
+  GOrbitApp->SetProcess(target.GetProcess());
+
+  std::string target_label_text = absl::StrFormat("%s @ localhost", target.GetProcess()->name());
+  target_label_->setText(QString::fromStdString(target_label_text));
+  target_label_->setStyleSheet(QString("color: %1").arg(kGreenColor));
+}
+
+void OrbitMainWindow::SetTarget(orbit_qt::FileTarget& target) {
+  target_label_->setText(QString::fromStdString(target.GetCaptureFilePath().filename().string()));
 }

@@ -300,7 +300,7 @@ class OrbitApp final : public DataViewFactory, public CaptureListener {
       const std::vector<ModuleData*>& modules,
       absl::flat_hash_map<std::string, std::vector<uint64_t>> function_hashes_to_hook_map = {},
       absl::flat_hash_map<std::string, std::vector<uint64_t>> frame_track_function_hashes_map = {});
-  // TODO(170468590) clean this up
+  // TODO(170468590): [ui beta] when out of ui beta, clean this up
   void UpdateProcessAndModuleList(ProcessData* process);
 
   void UpdateAfterSymbolLoading();
@@ -332,7 +332,7 @@ class OrbitApp final : public DataViewFactory, public CaptureListener {
     process_ = std::make_unique<ProcessData>(*process);
   }
   [[nodiscard]] ProcessManager* GetProcessManager() {
-    // TODO(170468590) remove this
+    // TODO(170468590): [ui beta] when out of ui beta, remove this
     if (process_manager_beta_ == nullptr) return process_manager_old_.get();
 
     return process_manager_beta_;
@@ -499,9 +499,9 @@ class OrbitApp final : public DataViewFactory, public CaptureListener {
   std::unique_ptr<ThreadPool> thread_pool_;
   std::unique_ptr<CaptureClient> capture_client_;
 
-  // TODO(170468590) remove this
+  // TODO(170468590): [ui beta] when out of ui beta, remove this
   std::unique_ptr<ProcessManager> process_manager_old_;
-  // TODO(170468590) rename: remove beta_;
+  // TODO(170468590): [ui beta] when out of ui beta, rename to process_manager_
   ProcessManager* process_manager_beta_ = nullptr;
 
   std::unique_ptr<OrbitClientData::ModuleManager> module_manager_;

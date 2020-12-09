@@ -46,7 +46,7 @@ class OrbitMainWindow : public QMainWindow {
   Q_OBJECT
 
  public:
-  OrbitMainWindow(QApplication* app, orbit_qt::ConnectionConfiguration connection_configuration,
+  OrbitMainWindow(QApplication* app, orbit_qt::TargetConfiguration target_configuration,
                   uint32_t font_size);
   // TODO (170468590) remove when not needed anymore
   OrbitMainWindow(QApplication* app, orbit_qt::ServiceDeployManager* service_deploy_manager,
@@ -80,8 +80,10 @@ class OrbitMainWindow : public QMainWindow {
 
   void RestoreDefaultTabLayout();
 
-  std::optional<orbit_qt::ConnectionConfiguration> ClearConnectionConfiguration() {
-    return std::move(connection_configuration_);
+  // TODO(170468590): [ui beta] When out of ui beta, this can return TargetConfiguration (without
+  // std::optional)
+  std::optional<orbit_qt::TargetConfiguration> ClearTargetConfiguration() {
+    return std::move(target_configuration_);
   }
 
  protected:
@@ -136,6 +138,10 @@ class OrbitMainWindow : public QMainWindow {
 
   QTabWidget* FindParentTabWidget(const QWidget* widget) const;
 
+  void SetTarget(orbit_qt::StadiaTarget& target);
+  void SetTarget(orbit_qt::LocalTarget& target);
+  void SetTarget(orbit_qt::FileTarget& target);
+
  private:
   QApplication* m_App;
   Ui::OrbitMainWindow* ui;
@@ -143,6 +149,7 @@ class OrbitMainWindow : public QMainWindow {
   std::vector<OrbitGLWidget*> m_GlWidgets;
   OrbitGLWidget* introspection_widget_ = nullptr;
   QFrame* hint_frame_ = nullptr;
+  QLabel* target_label_ = nullptr;
 
   // Capture toolbar.
   QIcon icon_start_capture_;
@@ -160,7 +167,8 @@ class OrbitMainWindow : public QMainWindow {
   };
   std::map<QTabWidget*, TabWidgetLayout> default_tab_layout_;
 
-  std::optional<orbit_qt::ConnectionConfiguration> connection_configuration_;
+  // TODO(170468590): [ui beta] When out of ui beta, this does not need to be an optional anymore
+  std::optional<orbit_qt::TargetConfiguration> target_configuration_;
 };
 
 #endif  // ORBIT_QT_ORBIT_MAIN_WINDOW_H_

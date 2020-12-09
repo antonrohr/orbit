@@ -104,7 +104,7 @@ ABSL_FLAG(bool, enable_tracepoint_feature, false,
 
 ABSL_FLAG(bool, thread_state, false, "Collect thread states");
 
-// TODO(170468590): Remove this flag when the new UI is finished
+// TODO(170468590): [ui beta] Remove this flag when the new UI is finished
 ABSL_FLAG(bool, enable_ui_beta, false, "Enable the new user interface");
 
 using ServiceDeployManager = orbit_qt::ServiceDeployManager;
@@ -222,7 +222,7 @@ void RunBetaUiInstance(QApplication* app,
                        const Context* ssh_context) {
   qRegisterMetaType<std::error_code>();
 
-  // TODO(170468590) remove optional from deployment_configuration as soon as not needed anymore
+  // TODO(170468590): [ui beta] when out of ui beta, remove optional from deployment_configuration
   CHECK(deployment_configuration.has_value());
 
   const GrpcPort grpc_port{/*.grpc_port =*/absl::GetFlag(FLAGS_grpc_port)};
@@ -231,15 +231,15 @@ void RunBetaUiInstance(QApplication* app,
   orbit_qt::SshConnectionArtifacts ssh_connection_artifacts{ssh_context, grpc_port,
                                                             &(deployment_configuration.value())};
 
-  std::optional<orbit_qt::ConnectionConfiguration> connection_config;
+  std::optional<orbit_qt::TargetConfiguration> target_config;
 
   while (true) {
     {
-      orbit_qt::ProfilingTargetDialog target_dialog{
-          &ssh_connection_artifacts, main_thread_executor.get(), std::move(connection_config)};
-      connection_config = target_dialog.Exec();
+      orbit_qt::ProfilingTargetDialog target_dialog{&ssh_connection_artifacts,
+                                                    std::move(target_config)};
+      target_config = target_dialog.Exec();
 
-      if (!connection_config.has_value()) {
+      if (!target_config.has_value()) {
         // User closed dialog
         break;
       }
@@ -252,22 +252,15 @@ void RunBetaUiInstance(QApplication* app,
     {  // Scoping of QT UI Resources
 
       ServiceDeployManager* service_deploy_manager_ptr = nullptr;
-      std::visit(
-          [&service_deploy_manager_ptr](auto&& target) {
-            using Target = std::decay_t<decltype(target)>;
-            if constexpr (std::is_same_v<Target, orbit_qt::StadiaProfilingTarget>) {
-              service_deploy_manager_ptr = target.GetConnection()->GetServiceDeployManager();
-            } else if constexpr (std::is_same_v<Target, orbit_qt::LocalTarget>) {
-            } else if constexpr (std::is_same_v<Target, orbit_qt::FileTarget>) {
-            } else {
-              UNREACHABLE();
-            }
-          },
-          connection_config.value());
+      if (std::holds_alternative<orbit_qt::StadiaTarget>(target_config.value())) {
+        service_deploy_manager_ptr = std::get<orbit_qt::StadiaTarget>(target_config.value())
+                                         .GetConnection()
+                                         ->GetServiceDeployManager();
+      }
 
       constexpr uint32_t kDefaultFontSize = 14;
 
-      OrbitMainWindow w(app, std::move(connection_config.value()), kDefaultFontSize);
+      OrbitMainWindow w(app, std::move(target_config.value()), kDefaultFontSize);
 
       // "resize" is required to make "showMaximized" work properly.
       w.resize(1280, 720);
@@ -294,7 +287,7 @@ void RunBetaUiInstance(QApplication* app,
 
       application_return_code = QApplication::exec();
 
-      connection_config = w.ClearConnectionConfiguration();
+      target_config = w.ClearTargetConfiguration();
     }
 
     Orbit_ImGui_Shutdown();
