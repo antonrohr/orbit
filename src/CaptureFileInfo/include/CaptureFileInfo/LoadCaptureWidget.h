@@ -44,6 +44,8 @@ class LoadCaptureWidget : public QWidget {
   void showEvent(QShowEvent* event) override;
   void DetachRadioButton();
   void SelectViaFilePicker();
+  void OnTableContextMenuRequested(const QPoint& pos);
+  void OnRemoveFromList(const QString& file_path);
 };
 
 }  // namespace orbit_capture_file_info

@@ -45,6 +45,9 @@ LoadCaptureWidget::LoadCaptureWidget(QWidget* parent)
                                Qt::SortOrder::DescendingOrder);
   ui_->tableView->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
   ui_->tableView->verticalHeader()->setDefaultSectionSize(kRowHeight);
+  ui_->tableView->setContextMenuPolicy(Qt::CustomContextMenu);
+  QObject::connect(ui_->tableView, &QWidget::customContextMenuRequested, this,
+                   &LoadCaptureWidget::OnTableContextMenuRequested);
 
   // The following is to make the radiobutton behave as if it was part of an exclusive button group
   // in the parent widget (ProfilingTargetDialog). If a user clicks on the radiobutton and it was
@@ -125,6 +128,28 @@ void LoadCaptureWidget::SelectViaFilePicker() {
 
   emit FileSelected(file_path.toStdString());
   emit SelectionConfirmed();
+}
+
+void LoadCaptureWidget::OnTableContextMenuRequested(const QPoint& pos) {
+  QModelIndex index = ui_->tableView->indexAt(pos);
+  if (!index.isValid()) return;
+
+  CHECK(index.data(Qt::UserRole).canConvert<QString>());
+
+  QString file_path = index.data(Qt::UserRole).value<QString>();
+
+  auto remove_action = std::make_unique<QAction>("Remove from list");
+  QObject::connect(remove_action.get(), &QAction::triggered, this,
+                   [&]() { OnRemoveFromList(file_path); });
+
+  LOG("Requested %s", file_path.toStdString());
+
+  QMenu::exec({remove_action.get()}, ui_->tableView->viewport()->mapToGlobal(pos));
+  LOG("HERE");
+}
+
+void LoadCaptureWidget::OnRemoveFromList(const QString& file_path) {
+  LOG("remove from list requested: %s", file_path.toStdString());
 }
 
 }  // namespace orbit_capture_file_info

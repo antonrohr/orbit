@@ -305,6 +305,8 @@ void ProfilingTargetDialog::SetupLocalStates() {
   state_local_.assignProperty(ui_->localProfilingRadioButton, "checked", true);
   state_local_.assignProperty(ui_->stadiaWidget, "active", false);
   state_local_.assignProperty(ui_->loadCaptureWidget, "active", false);
+  // TODO extra commit
+  state_local_.assignProperty(ui_->targetLabel, "text", "");
 
   // STATE state_local_connecting_
   state_local_connecting_.assignProperty(ui_->localProfilingStatusMessage, "text", "Connecting...");
